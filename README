@@ -1,0 +1,13 @@
+python WikiExtractor.py ../Corpus/enwiki-20161001-pages-articles-multistream.xml --output ../WikiOutput/OutputofWikiExtractor20170330.ver/ --lustyle --html --bytes 200M --filter_disambig_pages --min_text_length 100
+
+目的是，只保留纯粹的Article页面。消歧面要过滤掉，同时non stopwords的数量少于100的，也要过滤掉。此外，如ESA(by Cagatay Calli)中提到的那些、标了红色的也去掉(见2017-02-11日志)。
+
+
+
+
+
+python ParseWikiExtractorOut.py ../WikiOutput/OutputofWikiExtractor20170330.ver/AA/ --output ../WikiOutputParse/WE0330_PWEO0330/
+
+这个程序是对OutputofWikiExtractor20170330.ver/AA/目录下的文件进行词性标注、词形还原处理，生成的结果文件就保存在cluster的../WikiOutputParser/ WE0330_PWEO0330目录下。
+
+
