@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+import os
+import sys
+import time
 import argparse
 import fileinput
 import random
@@ -7,10 +10,180 @@ import pickle
 import logging
 from multiprocessing import Process, Queue
 from multiprocessing import Value
-from util.basic import *
-import config
 
-__version__ = '2017040402'
+__version__ = '2017040405'
+
+if sys.platform == "win32":
+    # On Windows, the best timer is time.clock()
+    default_timer = time.clock
+else:
+    # On most other platforms the best timer is time.time()
+    default_timer = time.time
+
+
+class config(object):
+    # 日志输出格式
+    # FORMAT = 'PID:%(process)d - %(levelname)s [%(lineno)d]: [%(funcName)s] %(message)s'
+    FORMAT = 'PID:%(process)d - %(levelname)s: %(message)s'
+    # 将日志保存到文件中,空的话输出到控制台
+    log2file = ''
+    # 处理多少篇文章后报告速度
+    REPORT_NUM = 10
+
+    # 映射表保存位置
+    links_map_directory = 'links_map'
+
+    # 所有正则
+    # 匹配文档的开头
+    docRE = re.compile(r'<doc id="(\d+)" url="(.*?)" title="(.*?)">')
+    # 匹配文本中的标签
+    tagRE = re.compile(r'<[^>]+>', re.S)
+    # 提取[[和]]之间的内容，并且内容中不能包含[[
+    linkRE_1 = re.compile(r'\[\[((?:(?!\]\]).)+)\]\]')
+    # 提取{{和}}之间的内容，并且内容中不能包含[[
+    linkRE_2 = re.compile(r'\{\{((?:(?!\}\}).)+)\}\}')
+    # 提取 token/POS/lemma 中的lemma
+    ExtractLemmaRE = re.compile(r'[^\s\/]*\/[^\s\/]*\/([^\s\/]*)')
+    # ExtractLemmaRE = re.compile(r'([^\s\/]*)\/(?:[^\s\/]*\/[^\s\/]*|[^\s\/]*)\/([^\s\/]*)')
+    # 提取 token/POS/lemma 中的token
+    ExtractTokenRE = re.compile(r'([^\s\/]*)\/[^\s\/]*\/[^\s\/]*')
+    # ExtractTokenRE = re.compile(r'([^\s\/]*)\/(?:[^\s\/]*\/[^\s\/]*|[^\s\/]*)\/[^\s\/]*')
+    # 文本查找时用来构建查找特定词的正则
+    re_word_base = r'[^\s\/]*\/[^\s\/]*\/{}'
+    # 多个斜线的问题 .../.../.../...
+    re_unnecessary_bias = re.compile(r'([^\s\/]*)\/(?:[^\s\/]*\/([^\s\/]*)|([^\s\/]*))\/([^\s\/]*)')
+
+    # 文本中存在如下字符串，报错
+    ErrorToken = ['{{', '}}']
+
+
+def cpu_count():
+    '''
+    Returns the number of CPUs in the system
+    '''
+    if sys.platform == 'win32':
+        try:
+            num = int(os.environ['NUMBER_OF_PROCESSORS'])
+        except (ValueError, KeyError):
+            num = 0
+    elif 'bsd' in sys.platform or sys.platform == 'darwin':
+        comm = '/sbin/sysctl -n hw.ncpu'
+        if sys.platform == 'darwin':
+            comm = '/usr' + comm
+        try:
+            with os.popen(comm) as p:
+                num = int(p.read())
+        except ValueError:
+            num = 0
+    else:
+        try:
+            num = os.sysconf('SC_NPROCESSORS_ONLN')
+        except (ValueError, OSError, AttributeError):
+            num = 0
+
+    if num >= 1:
+        return num
+    else:
+        raise NotImplementedError('cannot determine number of cpus')
+
+
+class OutputSaver(object):
+    def __init__(self, filepath, filename):
+        self.filepath = filepath
+        self.file = {}
+        if filename:
+            self.file[filename] = self.open(filename)
+
+    def reserve(self, filename):
+        if filename not in self.file:
+            self.file[filename] = self.open(filename)
+
+    def write(self, data, filename):
+        self.reserve(filename)
+        self.file[filename].write(data)
+
+    def close(self):
+        if self.file:
+            for i in self.file.items():
+                i[1].close()
+
+    def open(self, filename):
+        return open(self.filepath + '/' + filename, 'w')
+
+
+def files_from(path):
+    for f in os.listdir(path):
+        if os.path.isfile('{}/{}'.format(path, f)):
+            yield f
+
+
+def pages_from(input):
+    '''
+    每次返回一个doc
+    :param input:
+    :return:
+    '''
+    id = None
+    url = None
+    title = None
+    in_text = False
+    text = []
+    for line in input:
+        line = line.decode('utf-8').encode('utf-8')
+        if in_text:
+            if line == '</doc>\n' or line == '</doc>\r\n' or line == '</doc>':
+                in_text = False
+                all_text = ''.join(text)
+                del text
+                yield [id, title, url, all_text]
+                del all_text
+                text = []
+            else:
+                # 去处html标签
+                text.append(line)
+        else:
+            m = config.docRE.search(line)
+            if m:
+                title = m.group(3)
+                id = m.group(1)
+                url = m.group(2)
+                in_text = True
+
+
+def normalize(text):
+    '''
+    处理文本，去掉一些不规则的字符
+    :param text:
+    :return:
+    '''
+    text[0] = text[0].replace('&quot;', '"')
+    text[0] = text[0].replace('&#039;', '\'')
+    text[0] = text[0].replace('&amp;', '&')
+
+    # .../.../.../...
+    def func(m):
+        token = m.group(1)
+        lemma = m.group(4)
+        if m.group(2):
+            pos = m.group(2)
+        else:
+            pos = m.group(3)
+        return '{}/{}/{}'.format(token, pos, lemma)
+
+    text[0] = config.re_unnecessary_bias.sub(func, text[0])
+
+
+def checkNorm(text):
+    '''
+    检查ErrorToken中在text中出现的字符
+    :param text:
+    :return:
+    '''
+    tag = []
+    for token in config.ErrorToken:
+        if token in text[0]:
+            tag.append(token)
+    return tag
 
 
 class DumpRunTime:
@@ -106,74 +279,6 @@ def build_link_map(text, maps):
                                           reverse=True)
 
 
-def build_link_map_old(text):
-    '''
-    提取文章中人工标注的链接
-    :param text:
-    :return:
-    '''
-    links_map = []
-    # text是一个string
-    links = config.linkRE.findall(text[0])
-    links = list(set(links))  # 去掉重复的链接
-    if links:
-        for link, link_source in map(extract_link_block, links):
-            if not link:
-                continue
-            # link 中有一个item时，[0]:链接指向本身
-            # link 中有两个item时，[0]:指向的目标，[1]:链接的名称
-            link_num = len(link)
-            if link_num == 1:
-                # 这是只有链接是本身的情况
-                word = config.AttiProRE.findall(link[0])
-                if word:
-                    item = {
-                        'match': word,  # 需要匹配的部分，是一个列表
-                        'match_word_num': len(word),
-                        'source': link,  # 处理过的链接的原形
-                        'link_source': link_source,  # 为处理过的链接原形
-                        'target': None  # 链接的目标，None表示本身
-                    }
-                else:
-                    # 可能无法用 / 分开，所以用所有词
-                    item = {
-                        'match': link[0],  # 需要匹配的部分，是一个字符串
-                        'match_word_num': link[0].count(' ') + 1,
-                        'source': link,  # 处理过的链接的原形
-                        'link_source': link_source,  # 为处理过的链接原形
-                        'target': None  # 链接的目标，None表示本身
-                    }
-                links_map.append(item)
-            elif link_num == 2:
-                # 排除 [[ Category:Anarchism | ]] 这种情况
-                if not link[1]:
-                    logging.debug("Found a link without source, this link is %s", str(link))
-                    continue
-                # 这是链接到其他的概念
-                word = config.AttiProRE.findall(link[1])
-                if word:
-                    item = {
-                        'match': word,  # 需要匹配的部分，是一个列表
-                        'match_word_num': len(word),
-                        'source': link,  # 处理过的链接的原形
-                        'link_source': link_source,  # 为处理过的链接原形
-                        'target': link[0]  # 链接的目标，None表示本身
-                    }
-                else:
-                    item = {
-                        'match': link[1],  # 需要匹配的部分，是一个字符串
-                        'match_word_num': link[0].count(' ') + 1,
-                        'source': link,  # 处理过的链接的原形
-                        'link_source': link_source,  # 为处理过的链接原形
-                        'target': link[0]  # 链接的目标，None表示本身
-                    }
-                links_map.append(item)
-            else:
-                logging.error("There are multiple '|' in the link, please check. link: %s", str(link))
-        # 将映射表按照match中单词长度倒序排列
-        return sorted(links_map, key=lambda x: x['match_word_num'], reverse=True)
-
-
 def get_wikititles(tokens, maps):
     '''
     获取所有token中出现次数最多的token，返回对应的wikititletag，和是否为直接链接
@@ -225,12 +330,9 @@ def check_bracket(text, x, y, match_group):
         left_block = text[0][:x]
     left_block = left_block[::-1]  # 倒叙排列,因为所有结束标记的时候从x开始
     right_block = text[0][y:y + 300]
-    # 计算长度
-    left_block_length = len(left_block)
-    right_block_length = len(right_block)
     # 查找左右出现[[和]]的位置
-    left_brance1_start = left_block.find(r'[[')
-    left_brance1_end = left_block.find(r']]')
+    # left_brance1_start = left_block.find(r'[[')
+    # left_brance1_end = left_block.find(r']]')
     right_brance1_start = right_block.find(r'[[')
     right_brance1_end = right_block.find(r']]')
     # 查找左右出现{{和}}的位置
@@ -251,12 +353,12 @@ def check_bracket(text, x, y, match_group):
     #    4.是内部部分词,返回1和}}位置(为了插入{{{ }}}标记 )
     # 三.不在[[ ]]和{{ }}内部,返回0
     if right_brance1_start > right_brance1_end >= 0 or \
-        right_brance1_end >= 0 > right_brance1_start:
+                            right_brance1_end >= 0 > right_brance1_start:
         # 在[[ ]]内部,直接返回 -1
         return -1, None
 
     if right_brance2_start > right_brance2_end >= 0 or \
-        right_brance2_end >= 0 > right_brance2_start:
+                            right_brance2_end >= 0 > right_brance2_start:
         # 在{{ }}内部
         # print '\n在{{ }}内部'
         # print '*********************'
@@ -273,19 +375,19 @@ def check_bracket(text, x, y, match_group):
             # print '{{ | xy }}'
             # print '|到x的距离: %d' % left_vertical
             # print 'y到}}的距离: %d' % right_brance2_end
-            if left_vertical <=2 and right_brance2_end <= 2:
+            if left_vertical <= 2 and right_brance2_end <= 2:
                 # 是全部的词
                 return -1, None
             else:
                 # 是部分词
-                return 1, right_brance2_end+2
+                return 1, right_brance2_end + 2
         else:
             # {{ xy }}
             # print '{{ xy }}'
             # print '{{到x的距离: %d' % left_brance2_start
             # print 'y到}}的距离: %d' % right_brance2_end
 
-            if left_brance2_start <=2 and right_brance2_end <= 2:
+            if left_brance2_start <= 2 and right_brance2_end <= 2:
                 # 是全部的词
                 return -1, None
             else:
@@ -295,66 +397,11 @@ def check_bracket(text, x, y, match_group):
                 # print match_group
                 # print 'y: %s, right_brance2_end: %s' % (y, right_brance2_end)
                 # print 'end--------是部分词'
-                return 1, right_brance2_end+2
+                return 1, right_brance2_end + 2
     else:
         # print match_group
         # print '这是未在{{ }} [[ ]]内部的匹配'
         return 0, None
-
-    # start_1 = text[0][y:300].find(r'[[')
-    # end_1 = text[0][y:300].find(r']]')
-    # if start_1 > end_1 >= 0 or end_1 >= 0 > start_1:
-    #     # 在[[ ]]内部
-    #     return -1, None
-    # # elif start_1 >= 0 > end_1:  # 这里不对了,因为支取了300个词
-    # #     # 出现[[ ... 未闭合的情况
-    # #     logging.error('Find the unclosed label at [[ ]], y: %s', y)
-    # #     return -1, None
-    #
-    # # 上面的判断做完后能够保证token在[[ ]]外，但是不能保证是否在{{ }}的范围
-    # start_2 = text[0][y:].find(r'{{')
-    # end_2 = text[0][y:].find(r'}}')
-    # if end_2 > start_2 >= 0 or start_2 == end_2 == -1 or start_2 >= 0 > end_2:
-    #     # 在{{ }}外部，同时也在[[ ]]外部
-    #     return 0, None
-    # elif start_2 > end_2 >= 0 or end_2 >= 0 > start_2:
-    #     # 在{{ }}内部，还需要判断当前匹配的token是否是词块的全部，如果是全部就不用在外部添加{{{ }}}，否则添加。
-    #     # 倒叙查找{{
-    #     # print '--------check_bracket---------'
-    #     # TODO 这里需要验证下，是否有超过300个字符的链接词
-    #     if y > 300:
-    #         temp = text[0][y - 300:y]
-    #     else:
-    #         temp = text[0][:y]
-    #     # print type(temp), len(temp)
-    #     tag_brance = temp[::-1].find('{{')
-    #     tag_vertical = temp[::-1].find('|')
-    #
-    #     if tag_brance > tag_vertical >= 0:
-    #         # {{  |  y 这种模式
-    #         diff = tag_vertical - (y - x)
-    #     elif tag_brance >= 0 > tag_vertical or tag_vertical > tag_brance >= 0:
-    #         # {{     y 这种模式    或
-    #         # |  {{  y 这种模式
-    #         # 此时还需要判断是否为{{ y | 这种模式
-    #         # print tag_brance, tag_vertical
-    #         vertical = text[0][y:].find(r' | ')
-    #         if 0 == vertical:
-    #             return -1, None
-    #         diff = tag_brance - (y - x)
-    #     else:
-    #         raise ValueError, '出现未匹配的标签,tag_brance: %s,tag_vertical: %s,x: %s,y: %s' % (tag_brance, tag_vertical, x, y)
-    #
-    #     # print 'diff: %s' % diff
-    #
-    #     if diff == 1:
-    #         # 机器添加的都是 1
-    #         return -1, None
-    #     else:
-    #         return 1, end_2 + 2
-    # else:
-    #     logging.error('Find the unclosed label at {{ }}', y)
-    #     return -1, None
 
 
 def replace_title_link(text, title):
@@ -415,6 +462,7 @@ def replace_link(text, maps):
             for w in link_map[0].split(' '):
                 re_tag.append(config.re_word_base.format(re.escape(w)))
             re_lemma = re.compile(r' +'.join(re_tag) + r'\s')
+            # print r' +'.join(re_tag) + r'\s'
             logging.debug('%s', r' +'.join(re_tag) + r'\s')
             # 查找所有匹配
             matchIter = re_lemma.finditer(text[0])
@@ -566,7 +614,7 @@ def Parse(file, output_directory, reduce_page_number, process_start_time):
 
         # 1000次报告一次当前进度
         reduce_page_number.value += 1
-        if reduce_page_number.value % 100 == 0:
+        if reduce_page_number.value % config.REPORT_NUM == 0:
             total_time = default_timer() - process_start_time
             reduce_rate = reduce_page_number.value / total_time
             logging.info("Process %d articles, total time %.2fs ( %.2f art/s )", reduce_page_number.value,
@@ -576,6 +624,8 @@ def Parse(file, output_directory, reduce_page_number, process_start_time):
     with DumpRunTime('save_link_map'):
         with open('{}/{}_link_maps'.format(config.links_map_directory, filename), 'w') as f:
             pickle.dump(link_maps, f)
+
+    del link_maps
 
     # 关闭保存的文件
     out.close()
@@ -620,8 +670,10 @@ def main():
     process_number = args.processes
 
     # 配置日志
-    # logging.basicConfig(format=config.FORMAT, filename='2step.log')
-    logging.basicConfig(format=config.FORMAT)
+    if config.log2file:
+        logging.basicConfig(format=config.FORMAT, filename=config.log2file)
+    else:
+        logging.basicConfig(format=config.FORMAT)
     logger = logging.getLogger()
     if not args.quiet:
         logger.setLevel(logging.INFO)
