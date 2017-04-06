@@ -65,6 +65,9 @@ from multiprocessing import Queue, Process, Value, cpu_count
 from timeit import default_timer
 #from nltk.corpus import stopwords
 
+__version__ = '20170330'
+__modify_author__ = 'Lu Wenpeng'
+
 PY2 = sys.version_info[0] == 2
 if PY2:
     from urllib import quote

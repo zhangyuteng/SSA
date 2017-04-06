@@ -26,6 +26,8 @@ from multiprocessing import Queue, Process, Value, cpu_count
 from timeit import default_timer
 from pattern.en import parse, pprint, tree, WORD, POS, CHUNK, PNP, LEMMA, pprint, parsetree, tokenize
 
+__version__ = '20170331'
+__modify_author__ = 'Lu Wenpeng'
 
 PY2 = sys.version_info[0] == 2
 if PY2:
