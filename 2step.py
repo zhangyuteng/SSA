@@ -11,7 +11,7 @@ import logging
 from multiprocessing import Process, Queue
 from multiprocessing import Value
 
-__version__ = '2017040405'
+__version__ = '2017040410'
 
 if sys.platform == "win32":
     # On Windows, the best timer is time.clock()
@@ -39,9 +39,9 @@ class config(object):
     # 匹配文本中的标签
     tagRE = re.compile(r'<[^>]+>', re.S)
     # 提取[[和]]之间的内容，并且内容中不能包含[[
-    linkRE_1 = re.compile(r'\[\[((?:(?!\]\]).)+)\]\]')
-    # 提取{{和}}之间的内容，并且内容中不能包含[[
-    linkRE_2 = re.compile(r'\{\{((?:(?!\}\}).)+)\}\}')
+    linkRE_1 = re.compile(r'\s\[\[((?:(?!\]\]).)+)\]\]\s')
+    # 提取[[[和]]]之间的内容，并且内容中不能包含]]]
+    linkRE_2 = re.compile(r'\s\[\[\[((?:(?!\]\]\]).)+)\]\]\]\s')
     # 提取 token/POS/lemma 中的lemma
     ExtractLemmaRE = re.compile(r'[^\s\/]*\/[^\s\/]*\/([^\s\/]*)')
     # ExtractLemmaRE = re.compile(r'([^\s\/]*)\/(?:[^\s\/]*\/[^\s\/]*|[^\s\/]*)\/([^\s\/]*)')
@@ -317,11 +317,11 @@ def get_wikititles(tokens, maps):
 
 def check_bracket(text, x, y, match_group):
     '''
-    检查x-y位置在text中是否在[[ ]]或{{ }}标记内部或外部
-    在[[ ]]和{{ }}标记外部返回0，在[[ ]]内部返回-1，在{{ }}内部返回1和}}的位置
+    检查x-y位置在text中是否在[[ ]]或[[[ ]]]标记内部或外部
+    在[[ ]]和[[[ ]]]标记外部返回0，在[[ ]]内部返回-1，在[[[ ]]]内部返回1和]]]的位置
     :param text:
     :param y:
-    :return: 不在[[ ]]和{{ }}标签内返回0，在{{ }}内部返回1，其他情况都是不能替换返回-1
+    :return: 不在[[ ]][[[ ]]]标签内返回0，在[[[ ]]]内部返回1，其他情况都是不能替换返回-1
     '''
     # 先去x左侧的词块和y右侧的词块,各取300个词
     if x > 300:
@@ -331,77 +331,70 @@ def check_bracket(text, x, y, match_group):
     left_block = left_block[::-1]  # 倒叙排列,因为所有结束标记的时候从x开始
     right_block = text[0][y:y + 300]
     # 查找左右出现[[和]]的位置
-    # left_brance1_start = left_block.find(r'[[')
-    # left_brance1_end = left_block.find(r']]')
-    right_brance1_start = right_block.find(r'[[')
-    right_brance1_end = right_block.find(r']]')
-    # 查找左右出现{{和}}的位置
-    left_brance2_start = left_block.find(r'{{')
-    left_brance2_end = left_block.find(r'}}')
-    right_brance2_start = right_block.find(r'{{')
-    right_brance2_end = right_block.find(r'}}')
-    # 查找|出现的位置
+    left_brance2_start = left_block.find(r'[[')
+    # left_brance2_end = left_block.find(r']]')
+    right_brance2_start = right_block.find(r'[[')
+    right_brance2_end = right_block.find(r']]')
     left_vertical = left_block.find(r' | ')
     right_vertical = right_block.find(r' | ')
     # 各种情况的优先级
     # 一.在[[ ]]内部,直接返回 -1
-    # 二.在{{ }}内部有两种情况:
+    # 二.在[[[ ]]]内部有两种情况:
     #    1.在 | 左侧,返回-1;
     #    2.在 | 右侧,有两种情况:1.是全部的词,返回-1;
-    #                         2.是部分词,返回1 和 }} 的位置(为了插入{{{ }}}标记 )
+    #                         2.是部分词,返回1 和 }} 的位置(为了插入[[[[ ]]]]标记 )
     #    3.是内部的所有词,返回-1
-    #    4.是内部部分词,返回1和}}位置(为了插入{{{ }}}标记 )
-    # 三.不在[[ ]]和{{ }}内部,返回0
-    if right_brance1_start > right_brance1_end >= 0 or \
-                            right_brance1_end >= 0 > right_brance1_start:
-        # 在[[ ]]内部,直接返回 -1
-        return -1, None
-
-    if right_brance2_start > right_brance2_end >= 0 or \
-                            right_brance2_end >= 0 > right_brance2_start:
-        # 在{{ }}内部
-        # print '\n在{{ }}内部'
-        # print '*********************'
-        # print match_group
-        # print '*********************'
-        # print text[0][x-left_brance2_start-2:y + right_brance2_end+2]
-        # print '*********************'
-        if right_brance2_end > right_vertical >= 0:
-            # {{ xy | }}
-            # print '{{ xy | }}'
+    #    4.是内部部分词,返回1和}}位置(为了插入[[[[ ]]]]标记 )
+    # 三.不在[[ ]]和[[[ ]]]内部,返回0
+    # print '------------------'
+    # print match_group
+    # 此处排除在 [[ ]] 和 [[[[ ]]]]标记内, 直接返回-1
+    if 0 <= right_brance2_end < right_brance2_start or \
+         right_brance2_start < 0 <= right_brance2_end:
+        # 这种情况是: word ... ]] , 但是 ]] 不能确定是 ]]] 还是 ]]]]
+        # 如果是 ]] 或 ]]]] 直接返回0
+        if text[0][y+right_brance2_end+2:y+right_brance2_end+4] == r']]':
+            # print '这个是在[[[[ ]]]]内部的'
             return -1, None
-        elif left_brance2_start > left_vertical >= 0:
-            # {{ | xy }
-            # print '{{ | xy }}'
-            # print '|到x的距离: %d' % left_vertical
-            # print 'y到}}的距离: %d' % right_brance2_end
-            if left_vertical <= 2 and right_brance2_end <= 2:
-                # 是全部的词
+        elif text[0][y+right_brance2_end+2:y+right_brance2_end+3] == r']':
+            # print '这个是在[[[ ]]]内部的'
+            if right_brance2_end > right_vertical >= 0:
+                # [[[ xy | ]]]
+                # print '[[[ xy | ]]]'
                 return -1, None
+            elif left_brance2_start > left_vertical >= 0:
+                # [[[ | xy]]]
+                # print '[[[| xy ]]]'
+                # print '|到x的距离: %d' % left_vertical
+                # print 'y到}}的距离: %d' % right_brance2_end
+                if left_vertical <= 2 and right_brance2_end <= 2:
+                    # print '是全部的词'
+                    return -1, None
+                else:
+                    # print '是部分词'
+                    return 1, right_brance2_end + 3
             else:
-                # 是部分词
-                return 1, right_brance2_end + 2
-        else:
-            # {{ xy }}
-            # print '{{ xy }}'
-            # print '{{到x的距离: %d' % left_brance2_start
-            # print 'y到}}的距离: %d' % right_brance2_end
+                # [[[ xy ]]]
+                # print '[[[ xy ]]]'
+                # print '[[[到x的距离: %d' % left_brance2_start
+                # print 'y到]]]的距离: %d' % right_brance2_end
 
-            if left_brance2_start <= 2 and right_brance2_end <= 2:
-                # 是全部的词
-                return -1, None
-            else:
-                # 是部分词
-                # print 'start------是部分词'
-                # print text[0][x-left_brance2_start-2:y+right_brance2_end+2]
-                # print match_group
-                # print 'y: %s, right_brance2_end: %s' % (y, right_brance2_end)
-                # print 'end--------是部分词'
-                return 1, right_brance2_end + 2
-    else:
-        # print match_group
-        # print '这是未在{{ }} [[ ]]内部的匹配'
-        return 0, None
+                if left_brance2_start <= 2 and right_brance2_end <= 2:
+                    # print '是全部的词'
+                    return -1, None
+                else:
+                    # print '是部分词'
+                    # print 'start------是部分词'
+                    # print text[0][x-left_brance2_start-2:y+right_brance2_end+2]
+                    # print match_group
+                    # print 'y: %s, right_brance2_end: %s' % (y, right_brance2_end)
+                    # print 'end--------是部分词'
+                    return 1, right_brance2_end + 3
+        else:
+            # print '这个是在[[ ]]内部的'
+            return -1, None
+
+    return 0, None
 
 
 def replace_title_link(text, title):
@@ -426,15 +419,19 @@ def replace_title_link(text, title):
         if status == 0:
             # 链接在括号外，可直接添加标记
             replace_word = match.group(0)[:-1]
-            replace_word = '{{{{ {} }}}}'.format(replace_word)
+            replace_word = '[[[ {} ]]]'.format(replace_word)
+            # print 'replace_word'
+            # print replace_word
             match_length = y - x
             replace_length = len(replace_word)
             replace_list.append([x + last_diff, y + last_diff, replace_word])
             last_diff = last_diff + replace_length - match_length
         elif status == 1:
-            # 在{{ }}内部
+            # 在[[[ ]]]内部
             replace_word = match.group(0)[:-1]
-            replace_word = ' {{{{{{ {} }}}}}}'.format(replace_word)
+            replace_word = ' [[[[ {} ]]]]'.format(replace_word)
+            # print 'replace_word'
+            # print replace_word
             replace_length = len(replace_word)
             replace_list.append([y + pos + last_diff, y + pos + last_diff, replace_word])
             last_diff += replace_length
@@ -486,23 +483,27 @@ def replace_link(text, maps):
                             replace_word, is_direct = get_wikititles(link_map[1], maps)
                             # print 'is_direct: %s' % is_direct
                             if is_direct:
-                                replace_word = '{{{{ {} }}}}'.format(replace_word)
+                                replace_word = '[[[ {} ]]]'.format(replace_word)
                             else:
-                                replace_word = '{{{{ {} | {} }}}}'.format(replace_word, match.group().strip())
+                                replace_word = '[[[ {} | {} ]]]'.format(replace_word, match.group().strip())
+                            # print 'replace_word'
+                            # print replace_word
                             match_length = y - x
                             replace_length = len(replace_word)
                             replace_list.append([x + last_diff, y + last_diff, replace_word])
                             last_diff = last_diff + replace_length - match_length
                         elif status == 1:
-                            # 在{{ }}内部
+                            # 在[[[ ]]]内部
                             # print '----------replace_link------------'
                             # print match.group()
                             replace_word, is_direct = get_wikititles(link_map[1], maps)
                             # print 'is_direct: %s' % is_direct
                             if is_direct:
-                                replace_word = ' {{{{{{ {} }}}}}}'.format(replace_word)
+                                replace_word = ' [[[[ {} ]]]]'.format(replace_word)
                             else:
-                                replace_word = ' {{{{{{ {} | {} }}}}}}'.format(replace_word, match.group().strip())
+                                replace_word = ' [[[[ {} | {} ]]]]'.format(replace_word, match.group().strip())
+                            # print 'replace_word'
+                            # print replace_word
                             replace_length = len(replace_word)
                             replace_list.append([y + pos + last_diff, y + pos + last_diff, replace_word])
                             last_diff += replace_length
@@ -560,7 +561,6 @@ def Parse(file, output_directory, reduce_page_number, process_start_time):
         logging.info("id: %s, title: %s", id, title)
 
         #  文本的合法性检查：检查是否存在 {{ 或 }} 标记，有的话不处理
-        # TODO 记得把它解除注释
         # with DumpRunTime('checkNorm'):
         #     result = checkNorm(text)
         #     if result:
@@ -571,19 +571,20 @@ def Parse(file, output_directory, reduce_page_number, process_start_time):
         with DumpRunTime('normalize'):
             normalize(text)
 
-        # 添加标题的链接
-        with DumpRunTime('replace_title_link'):
-            replace_title_link(text, title)
-
         # 映射表
         maps = {
             'Map_lemme2tokens': {},
             'Map_token2wikititles_direct': {},
             'Map_token2wikititles_indirect': {}
         }
+
         # 创建词原形到概念的映射表
         with DumpRunTime('build_link_map'):
             build_link_map(text, maps)
+
+        # 添加标题的链接
+        with DumpRunTime('replace_title_link'):
+            replace_title_link(text, title)
 
         link_maps[title] = {
             'id': id,
@@ -592,7 +593,10 @@ def Parse(file, output_directory, reduce_page_number, process_start_time):
             'Map_token2wikititles_direct': maps['Map_token2wikititles_direct'],
             'Map_token2wikititles_indirect': maps['Map_token2wikititles_indirect']
         }
-
+        # for i in maps['Map_lemme2tokens']:
+        #     print '---------------'
+        #     print i[0]
+        #     print i[1]
         # 根据映射表替换文中没有添加的概念
         if maps['Map_lemme2tokens']:
             with DumpRunTime('replace_link'):
